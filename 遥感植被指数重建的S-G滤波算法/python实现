@@ -1,0 +1,212 @@
+import glob
+import numpy as np
+import pandas as pd
+from osgeo import gdal
+from statsmodels.tsa.ar_model import AutoReg, ar_select_order
+from dealwithdata.ncdealwith.Tiffmodel import Tiffmodel
+import itertools
+from scipy.signal import savgol_filter
+from dealwithdata.pap4.STL_Fitting import robust_stl
+import time
+
+
+
+# 滑动窗口法结合一阶自回归计算恢复力，x为一个一维矩阵，window代表了滑动窗口的大小，即要参与计算的数据的数量
+# 例如.某像元2000-2020逐年NDVI，假如滑动窗口大小window为3，
+# 则数据理论上应该为2000\2001\2002,代表2003年的恢复力从,2000和2001的值用nan进行代替
+def sliding_window_calc(x, window):
+    # 初始化一个矩阵用来存储恢复力
+    ar1 = np.empty(x.shape[0])
+    ar1.fill(np.nan)
+    # ln代表了数据的长度，
+    ln = x.shape[0]
+    for i in range(window, ln + 1):
+        i1 = i - window
+        i2 = i1 + window
+        subset = x[i1: i2]
+        try:
+            ar1_ = ar_select_order(subset, maxlag=1).model.fit().params[1]
+        except:
+            ar1_ = np.nan
+        ar1[i - 1] = ar1_
+    return ar1
+
+# 处理NDVI时间序列，利用S-G滤波
+def clean_ndvi_timeseries(orig_input):
+    """Following Chen et al. 2004"""
+    # Remove impossible values, linear fit
+    roll_ma = orig_input.rolling(window='20D').apply(np.nanmax)
+    roll_mi = orig_input.rolling(window='20D').apply(np.nanmin)
+
+    diff = roll_ma - roll_mi
+    orig_input[diff > 0.4] = np.nan
+
+    # Remove remaining missed clouds/water
+    # orig_input[orig_input < 0] = np.nan
+
+    # Mask out non-vegetated areas
+    mns = []
+    for yr in orig_input.groupby(orig_input.index.year):
+        yrdata = yr[1]
+        ttemp=np.nanmean(yrdata.values)
+        mns.append(np.nanmean(yrdata.values))
+
+    if np.nanmean(mns) < 0.1:
+        return np.array((np.nan,) * orig_input.shape[0]), False
+
+    # STEP 1 - Do the interpolation
+    else:
+        data = orig_input.interpolate('linear').bfill().ffill()
+        N_0 = data.copy()
+
+        # STEP 2 - Fit SG Filter, using best fitting parameters
+        arr = np.empty((4, 3))
+        for m, d in list(itertools.product([4, 5, 6, 7], [2, 3, 4])):
+            data_smoothed = pd.Series(savgol_filter(data.values, 2 * m + 1, d, deriv=0), index=data.index)
+            err = np.nansum(data_smoothed - data) ** 2
+            arr[m - 4, d - 2] = err
+        m, d = np.where(arr == np.nanmin(arr))
+        m, d = m[0] + 4, d[0] + 2
+        data_smoothed = pd.Series(savgol_filter(data.values, 2 * m + 1, d, deriv=0), index=data.index)
+        diff = N_0 - data_smoothed
+
+        # STEP 3 - Create weights array based on difference from curve
+        max_dif = np.nanmax(np.abs(diff.values))
+        weights = np.zeros(np.array(data_smoothed.values).shape)
+        weights[data_smoothed >= N_0] = 1
+        weights[data_smoothed < N_0] = 1 - (np.abs(diff.values) / max_dif)[data_smoothed < N_0]
+
+        # STEP 4 - Replace values that were smoothed downwards with original values
+        data_smoothed[N_0 >= data_smoothed] = N_0[N_0 >= data_smoothed]
+        data_smoothed[N_0 < data_smoothed] = data_smoothed[N_0 < data_smoothed]
+
+        # STEP 5 - Resmooth with different parameters
+        data_fixed = pd.Series(savgol_filter(data_smoothed.values, 9, 6, deriv=0), index=data.index)
+
+        # STEP 6 - Calculate the fitting effect
+        Fe_0 = np.nansum(np.abs(data_fixed.values - N_0.values) * weights)
+        data = data_fixed.copy()
+
+        # count = 0
+        # while Fe_0 >= Fe and Fe <= Fe_1:
+        Fe = Fe_0
+        while Fe_0 >= Fe:
+            # while count < 5:  # Faster and just as effective to limit the number of loops rather than having a convergence factor
+            # STEP 4 - Replace values that were smoothed downwards with original values
+            data[N_0 >= data] = N_0[N_0 >= data]
+            data[N_0 < data] = data[N_0 < data]
+            # STEP 5 - Resmooth with different parameters
+            data_fixed = pd.Series(savgol_filter(data.values, 9, 6, deriv=0), index=data.index)
+            # data_fixed = pd.Series(savgol_filter(data.values, 5, 2, deriv=0, rate=1), index=data.index)
+            # STEP 6 - Calculate the fitting effect
+            Fe = np.nansum(np.abs(data_fixed.values - N_0.values) * weights)
+            if Fe > Fe_0:
+                break
+            else:
+                Fe_0 = Fe.copy()
+                data = data_fixed.copy()
+        return np.array(data.values), True
+
+def replace_columns_with_nan(df):
+    # 将 DataFrame 转换为 NumPy 数组
+    data_array = df.values
+
+    # 判断每列是否有相同的元素
+    unique_counts = np.apply_along_axis(lambda col: len(np.unique(col)) == 1, axis=0, arr=data_array)
+
+    # 将有相同元素的列替换为 NaN
+    df.iloc[:, unique_counts] = np.nan
+
+if __name__ == '__main__':
+    start_time = time.time()
+    # 读取所有数据，将多年的NDVI数据读取为一个pd文件，每一行代表了一个像元
+    all_ndvidir = r'E:\EVIANDNDVI\newtry\alldatat\\'
+    datalist = sorted(glob.glob((all_ndvidir) + r'\\' + '*.tif'))
+    savepath = r'E:\EVIANDNDVI\newtry\sgold\\'
+    AC_savepath=r'E:\EVIANDNDVI\newtry\acold\\'
+
+    model = Tiffmodel()
+    model.read_img(r'E:\EVIANDNDVI\newtry\alldatat\MONTH_NDVI2000_02_01.tif')
+
+    all_data = np.empty((len(datalist), model.img_height, model.img_width))
+    for i in range(0, len(datalist)):
+        Data = gdal.Open(datalist[i]).ReadAsArray()
+        Data = Data.astype('float32')
+        all_data[i, :, ] = Data
+
+    all_data = all_data / 10000.00
+
+    two_dim_array1 = all_data.reshape(all_data.shape[0], -1)
+
+    modified_list_old = [s[-14:-4] for s in datalist]
+    modified_list = [s.replace('_', '-') for s in modified_list_old]
+    modified_list = pd.to_datetime(modified_list)
+
+    # date_range = pd.date_range(start='2000-02-18', end='2022-12-19', freq='18D')
+
+    talldata = pd.DataFrame(two_dim_array1, index=modified_list)
+
+    replace_columns_with_nan(talldata)
+
+    c1, r1 = talldata.shape
+    for i in range(0, r1):
+        print(i)
+        before_data = talldata.iloc[:, i]
+        # 剔除异常值
+        before_data[before_data < 0] = np.nan
+        before_data[before_data > 1] = np.nan
+        nan_percentage = before_data.isna().mean()
+        # 这里进行条件判断，来判断哪些值需要进行滤波
+        # 这里返回一个与原来长度相同的一个Series，但是内容全部为nan
+        if nan_percentage > 0.3:
+            ck = before_data.shape[0]
+            findata = np.array((np.nan,) * before_data.shape[0])
+        # 这里返回一个处理好的Series
+        else:
+            findata, dd = clean_ndvi_timeseries(before_data)
+        talldata.iloc[:, i] = findata
+
+    # 将sg处理好的数据重新进行输出:talldata
+    t1 = talldata.values
+    for i1 in range(0, t1.shape[0]):
+        outdata = t1[i1, :].reshape((model.img_height, model.img_width))
+        filename = savepath + modified_list_old[i1] + '.tif'
+        model.arr_stay(filename, outdata)
+
+    # talldata,对处理好的数据计算residual_component，形成新的res_stl_talldata
+    res_stl_talldata=talldata.copy()
+    res_stl_talldata.loc[:, :] = np.nan
+    print('+++++++++++++')
+    for j in range(0,r1):
+        CK_data = talldata.iloc[:, j].values
+        if np.isnan(CK_data).all():
+            ccc=np.array((np.nan,) * before_data.shape[0])
+            res_stl_talldata.loc[:, j]=ccc
+        else:
+            ccc1 = robust_stl(CK_data, period=12).resid
+            res_stl_talldata.loc[:, j]=ccc1
+
+    # 利用残差和滑动窗口法，计算ar，首先copy一个和AC_talldata相同大小的矩阵，然后进行计算
+    AC_talldata=talldata.copy()
+    AC_talldata.loc[:, :] = np.nan
+    print('+++++++++++++')
+    for jj in range(0,r1):
+        print(jj)
+        CK_data = res_stl_talldata.iloc[:, jj].values
+        if np.isnan(CK_data).all():
+            ccc=np.array((np.nan,) * before_data.shape[0])
+            AC_talldata.loc[:, jj]=ccc
+        else:
+            ccc1 = sliding_window_calc(CK_data, window=60)
+            AC_talldata.loc[:, jj]=ccc1
+
+    # 数据的输出
+    ther_ar = AC_talldata.values
+    for i in range(0, ther_ar.shape[0]):
+        aroutdata = ther_ar[i, :].reshape((model.img_height, model.img_width))
+        filename = AC_savepath +r'AC'+ modified_list_old[i] + '.tif'
+        model.arr_stay(filename, aroutdata)
+
+    end_time = time.time()
+    elapsed_time = (end_time - start_time)/60.00
+    print(f"程序运行时间：{elapsed_time} 分钟")
