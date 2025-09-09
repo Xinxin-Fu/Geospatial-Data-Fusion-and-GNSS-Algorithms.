@@ -1,2 +1,1 @@
-# Ecosystem-resilience-response-to-forest-fragmentation-in-China-Thresholds-identification
-Academic paper code share
+本仓库聚焦于地理空间数据处理与导航算法研究，涵盖数据融合、多源遥感信息集成、GNSS 定位与导航算法实现等方向。旨在提供高质量的开源工具和示例代码，支持无人系统任务规划、环境建模以及空间数据分析应用。项目内容兼顾科研与工程实践，可为地理信息系统、遥感处理及精密导航等领域的开发者和研究者提供参考与支持。
