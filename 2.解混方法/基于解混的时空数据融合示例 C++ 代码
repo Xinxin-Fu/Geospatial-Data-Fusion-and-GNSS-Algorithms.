@@ -1,0 +1,87 @@
+#include <iostream>
+#include <vector>
+#include "gdal_priv.h"
+#include "cpl_conv.h"
+
+using namespace std;
+
+// 简单线性解混函数
+double unmix(double modisVal, double endmemberVal, double abundance) {
+    return abundance * endmemberVal + (1.0 - abundance) * modisVal;
+}
+
+// 假设函数：根据土地利用类型返回端元值
+double getEndmemberValue(int landuseType) {
+    switch(landuseType) {
+        case 1: return 0.2; // 水体
+        case 2: return 0.5; // 草地
+        case 3: return 0.8; // 农田
+        default: return 0.3; // 其他
+    }
+}
+
+// 假设函数：计算粗像元内端元丰度
+double computeAbundance(int landuseType, int coarsePixelVal) {
+    // 简单比例示例
+    return 1.0; // 直接假设全部端元贡献，真实情况可根据混合像元计算
+}
+
+int main() {
+    GDALAllRegister();
+
+    // 打开输入数据
+    GDALDataset *landuseDs = (GDALDataset*)GDALOpen("landuse.tif", GA_ReadOnly);
+    GDALDataset *modis1Ds = (GDALDataset*)GDALOpen("modis1.tif", GA_ReadOnly);
+    GDALDataset *modis2Ds = (GDALDataset*)GDALOpen("modis2.tif", GA_ReadOnly);
+    GDALDataset *landsatDs = (GDALDataset*)GDALOpen("landsat.tif", GA_ReadOnly);
+
+    if (!landuseDs || !modis1Ds || !modis2Ds || !landsatDs) {
+        cout << "Error opening input files!" << endl;
+        return -1;
+    }
+
+    int xSize = landsatDs->GetRasterXSize();
+    int ySize = landsatDs->GetRasterYSize();
+
+    // 创建输出文件
+    GDALDriver *driver = GetGDALDriverManager()->GetDriverByName("GTiff");
+    GDALDataset *outDs = driver->Create("predicted_landsat.tif", xSize, ySize, 1, GDT_Float32, NULL);
+    outDs->SetGeoTransform(landsatDs->GetGeoTransform());
+    outDs->SetProjection(landsatDs->GetProjectionRef());
+
+    // 读取数据（这里简单示例为整块读取，可改成块读取节省内存）
+    GDALRasterBand *landuseBand = landuseDs->GetRasterBand(1);
+    GDALRasterBand *modis1Band = modis1Ds->GetRasterBand(1);
+    GDALRasterBand *modis2Band = modis2Ds->GetRasterBand(1);
+
+    vector<float> landuseBuf(xSize * ySize);
+    vector<float> modis1Buf(xSize * ySize);
+    vector<float> modis2Buf(xSize * ySize);
+    vector<float> predictedBuf(xSize * ySize);
+
+    landuseBand->RasterIO(GF_Read, 0, 0, xSize, ySize, landuseBuf.data(), xSize, ySize, GDT_Float32, 0, 0);
+    modis1Band->RasterIO(GF_Read, 0, 0, xSize, ySize, modis1Buf.data(), xSize, ySize, GDT_Float32, 0, 0);
+    modis2Band->RasterIO(GF_Read, 0, 0, xSize, ySize, modis2Buf.data(), xSize, ySize, GDT_Float32, 0, 0);
+
+    // 逐像元线性解混预测 Landsat 值
+    for (int i = 0; i < xSize * ySize; ++i) {
+        int luType = static_cast<int>(landuseBuf[i]);
+        double endmember = getEndmemberValue(luType);
+        double abundance = computeAbundance(luType, modis1Buf[i]);
+        predictedBuf[i] = unmix(modis2Buf[i], endmember, abundance);
+    }
+
+    // 写入输出
+    GDALRasterBand *outBand = outDs->GetRasterBand(1);
+    outBand->RasterIO(GF_Write, 0, 0, xSize, ySize, predictedBuf.data(), xSize, ySize, GDT_Float32, 0, 0);
+
+    // 关闭数据
+    GDALClose(landuseDs);
+    GDALClose(modis1Ds);
+    GDALClose(modis2Ds);
+    GDALClose(landsatDs);
+    GDALClose(outDs);
+
+    cout << "Prediction completed!" << endl;
+    return 0;
+}
