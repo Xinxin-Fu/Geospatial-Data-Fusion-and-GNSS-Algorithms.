@@ -1,0 +1,73 @@
+import numpy as np
+
+# 光速 (m/s)
+c = 299792458  
+
+# 模拟接收机真实位置 (x, y, z)，单位 m
+receiver_true = np.array([15600e3, 7540e3, 20140e3])  
+
+# 模拟接收机钟差 (单位：s)
+clock_bias_true = 1e-3  # 1毫秒
+clock_bias_true_m = c * clock_bias_true
+
+# 模拟卫星位置 (4颗及以上才能解算)，单位 m
+satellites = np.array([
+    [15600e3, 7540e3, 20140e3],
+    [18760e3, 2750e3, 18610e3],
+    [17610e3, 14630e3, 13480e3],
+    [19170e3, 610e3, 19810e3],
+    [17800e3, 9000e3, 14500e3]
+])
+
+# 根据真值生成伪距观测值
+def generate_pseudorange(sat_pos, rec_pos, clock_bias_m):
+    dist = np.linalg.norm(sat_pos - rec_pos)
+    return dist + clock_bias_m
+
+pseudoranges = np.array([generate_pseudorange(s, receiver_true, clock_bias_true_m) for s in satellites])
+
+# -------------------------
+# 最小二乘迭代解算
+# -------------------------
+
+# 初始猜测（随便给一个接近的点）
+x = np.array([0.0, 0.0, 6370e3, 0.0])  # x, y, z, clock bias(m)
+
+def least_squares_iteration(satellites, pseudoranges, x0, max_iter=10, tol=1e-4):
+    x = x0.copy()
+    for k in range(max_iter):
+        # 计算几何距离
+        est_ranges = np.array([np.linalg.norm(s - x[:3]) for s in satellites])
+        
+        # 观测 - 计算
+        L = pseudoranges - (est_ranges + x[3])
+        
+        # 构建设计矩阵 A
+        A = []
+        for i, s in enumerate(satellites):
+            dx = (x[0] - s[0]) / est_ranges[i]
+            dy = (x[1] - s[1]) / est_ranges[i]
+            dz = (x[2] - s[2]) / est_ranges[i]
+            A.append([dx, dy, dz, 1])
+        A = np.array(A)
+        
+        # 最小二乘解
+        dx = np.linalg.inv(A.T @ A) @ A.T @ L
+        
+        # 更新
+        x += dx
+        
+        print(f"迭代 {k+1}: 位置=({x[0]:.3f}, {x[1]:.3f}, {x[2]:.3f}), 钟差={x[3]:.3f} m")
+        
+        if np.linalg.norm(dx) < tol:
+            print("收敛！")
+            break
+    return x
+
+# 运行迭代
+solution = least_squares_iteration(satellites, pseudoranges, x)
+
+print("\n真值位置:", receiver_true)
+print("估计位置:", solution[:3])
+print("真值钟差(m):", clock_bias_true_m)
+print("估计钟差(m):", solution[3])
