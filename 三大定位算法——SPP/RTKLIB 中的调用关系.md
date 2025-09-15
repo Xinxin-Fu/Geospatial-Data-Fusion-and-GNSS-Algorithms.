@@ -33,4 +33,4 @@ extern int lsq(const double *A, const double *y, int n, int m, double *x,
 ```
 
 # # RTKLIB 里 SPP 的最小二乘实现确实非常“公式化”，几乎就是把线性代数公式直接套用。因此更应该关注的部分实际上是如何构建残差和设计矩阵，也就是上述的第二部（rescode函数），首先给出其大体的结构图
-![替代文字](SPP_代码调用逻辑.png)
+![替代文字](recode_代码调用逻辑.png)
