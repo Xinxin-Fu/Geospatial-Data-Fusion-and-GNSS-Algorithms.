@@ -45,3 +45,180 @@ PPP 的最大优势是 **不依赖基站、全球统一、成本低**，但 **�
 它特别适合全球分布式的长期精密监测和低成本高精度应用；  
 而对 **实时性要求高** 的场景，通常采用 PPP-RTK 或 RTK 作为补充。  
 
+---
+
+# PPP 公式推导（从观测方程到残差和设计矩阵）
+
+## 1. 伪距与载波观测方程
+
+在卫星导航中，接收机对卫星的伪距 (code) 和载波相位 (carrier phase) 观测值可表示为：
+
+$$
+P_i^s = \rho^s + c \cdot (dt_r - dt_s) + T^s + I_i^s + d_{P,i}^s + \epsilon_{P,i}^s
+$$
+
+$$
+\Phi_i^s = \rho^s + c \cdot (dt_r - dt_s) + T^s - I_i^s + \lambda_i N_i^s + d_{\Phi,i}^s + \epsilon_{\Phi,i}^s
+$$
+
+其中：
+
+- $P_i^s, \Phi_i^s$ ：频率 $ i $ 的伪距与载波观测值  
+-  $$\rho^s $$ ：几何距离  
+-  $$dt_r, dt_s $$ ：接收机钟差与卫星钟差  
+-  $$T^s $$ ：对流层延迟  
+-  $$I_i^s $$ ：电离层延迟  
+-  $$\lambda_i $$ ：载波波长  
+-  $$N_i^s $$ ：整周模糊度  
+-  $$d_{P,i}^s, d_{\Phi,i}^s $$ ：硬件延迟  
+-  $$\epsilon $$ ：测量噪声  
+
+---
+
+## 2. 无电离层组合 (IF)
+
+为消除一阶电离层延迟，采用无电离层组合：
+
+$$
+P_{IF}^s = \alpha P_1^s - \beta P_2^s
+$$
+
+$$
+\Phi_{IF}^s = \alpha \Phi_1^s - \beta \Phi_2^s
+$$
+
+其中组合系数为：
+
+$$
+\alpha = \frac{f_1^2}{f_1^2 - f_2^2}, \quad
+\beta = \frac{f_2^2}{f_1^2 - f_2^2}
+$$
+
+组合后的观测方程：
+
+$$
+P_{IF}^s = \rho^s + c \cdot (dt_r - dt_s) + T^s + d_{P,IF}^s + \epsilon_{P,IF}^s
+$$
+
+$$
+\Phi_{IF}^s = \rho^s + c \cdot (dt_r - dt_s) + T^s + \lambda_{IF} N_{IF}^s + d_{\Phi,IF}^s + \epsilon_{\Phi,IF}^s
+$$
+
+其中一阶电离层项已完全消除。
+
+---
+
+## 3. 线性化
+
+假设接收机坐标为：
+
+$$
+\mathbf{x} = (X, Y, Z)^T
+$$
+
+卫星坐标为 $$ (X^s, Y^s, Z^s) $$，几何距离为：
+
+$$
+\rho^s = \sqrt{(X^s - X)^2 + (Y^s - Y)^2 + (Z^s - Z)^2}
+$$
+
+对未知参数 $$ \mathbf{x}, dt_r $$ 在线性化展开：
+
+$$
+\delta \rho^s \approx -e_x^s \cdot \delta X - e_y^s \cdot \delta Y - e_z^s \cdot \delta Z
+$$
+
+其中方向余弦为：
+
+$$
+\mathbf{e}^s = \frac{1}{\rho^s} 
+\begin{bmatrix}
+X^s - X \\
+Y^s - Y \\
+Z^s - Z
+\end{bmatrix}
+$$
+
+---
+
+## 4. 残差方程
+
+对 IF 组合的观测方程线性化后，残差写作：
+
+$$
+v^s = L^s - \hat{\rho}^s - c \cdot \delta dt_r - \delta T^s - \lambda_{IF} \delta N^s
+$$
+
+其中：
+- $$L^s $$ ：观测值 (伪距或载波)  
+- $$\hat{\rho}^s $$ ：由近似坐标计算的几何距离  
+- $$v^s $$ ：残差  
+
+---
+
+## 5. 矩阵形式
+
+将所有卫星的观测方程写成矩阵形式：
+
+$$
+\mathbf{v} = \mathbf{A} \cdot \mathbf{x} - \mathbf{l}
+$$
+
+其中：  
+
+- 残差向量  
+
+$$
+\mathbf{v} =
+\begin{bmatrix}
+v^1 \\
+v^2 \\
+\vdots \\
+v^n
+\end{bmatrix}
+$$
+
+- 设计矩阵  
+
+$$
+\mathbf{A} =
+\begin{bmatrix}
+-e_x^1 & -e_y^1 & -e_z^1 & 1 & M^1 & \cdots \\
+-e_x^2 & -e_y^2 & -e_z^2 & 1 & M^2 & \cdots \\
+\vdots & \vdots & \vdots & \vdots & \vdots & \\
+-e_x^n & -e_y^n & -e_z^n & 1 & M^n & \cdots
+\end{bmatrix}
+$$
+
+其中各列对应：  
+- 接收机位置改正量 $$(\delta X, \delta Y, \delta Z) $$  
+- 接收机钟差 $$\delta dt_r $$  
+- 对流层参数 $$\delta T $$ (通过映射函数 $$ M^s $$)  
+- 模糊度参数 $$\delta N^s $$  
+
+- 观测向量  
+
+$$
+\mathbf{l} =
+\begin{bmatrix}
+L^1 - \hat{\rho}^1 \\
+L^2 - \hat{\rho}^2 \\
+\vdots \\
+L^n - \hat{\rho}^n
+\end{bmatrix}
+$$
+
+---
+
+## 6. 最终 PPP 观测方程形式
+
+因此，PPP 的线性化观测方程可写为：
+
+$$
+\mathbf{v} = \mathbf{A} \mathbf{x} - \mathbf{l}
+$$
+
+这就是 PPP 由原始观测值推导到残差方程和设计矩阵的全过程。
+
+
+
